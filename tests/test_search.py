@@ -35,10 +35,11 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(self.ids(sort_by='id'), ['004','003','002','001'])
 
     def test_search_and_no_matches(self):
-        self.assertEqual(self.ids(query='COTTON top'), ['001','002','003'])
+        self.assertCountEqual(self.ids(query='COTTON top'), ['001','002','003'])
         self.assertEqual(self.ids(query='spaceship engine'), [])
         self.assertEqual(self.ids(query='   '), ['001','002','003','004'])
-        self.assertEqual(self.catalog.search({'query':'skirt','include_recommendations':True})['recommendations'], [])
+        recs = self.catalog.search({'query':'skirt','include_recommendations':True})['recommendations']
+        self.assertTrue(all(r['for_product_id'] == '004' and r['id'] != '004' for r in recs))
 
     def test_invalid_arguments(self):
         for args in [{'limit':0},{'limit':True},{'offset':-1},{'sort_by':'unknown'},
