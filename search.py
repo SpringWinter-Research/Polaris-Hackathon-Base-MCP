@@ -5,6 +5,7 @@ typos, synonyms, mixed choices, complement requests) -> score candidates with an
 inverted index built at startup -> sort and paginate -> complementary recommendations.
 The schemas, tool contract and catalog facts are unchanged.
 """
+import bisect
 import difflib
 import json
 import math
@@ -264,6 +265,22 @@ class Catalog:
         self.freq = dict(freq)
         self.keyterms = {w for k in self.lex for w in k.split()} | set(COLOURS) | set(AUDIENCE_WORDS) | set(INTENTS)
         self.keyterm_list = sorted(self.keyterms)
+        # Pre-sorted orders for empty-query browsing (ties by ID ascending, null ratings last).
+        avg = [p['rating']['average'] for p in P]; cnt = [p['rating']['count'] for p in P]
+        rng = range(self.n)
+        self.orders = {
+            ('id', False): list(rng), ('id', True): list(reversed(rng)),
+            ('price', False): sorted(rng, key=lambda i: (self.price[i], i)), ('price', True): sorted(rng, key=lambda i: (-self.price[i], i)),
+            ('review_count', False): sorted(rng, key=lambda i: (cnt[i], i)), ('review_count', True): sorted(rng, key=lambda i: (-cnt[i], i)),
+            ('rating', False): sorted(rng, key=lambda i: (avg[i] is None, avg[i] or 0, i)),
+            ('rating', True): sorted(rng, key=lambda i: (avg[i] is None, -(avg[i] or 0), i)),
+        }
+        self.sorted_prices = [self.price[i] for i in self.orders[('price', False)]]
+        self.rank_of = {}
+        for k, order in self.orders.items():
+            r = [0] * self.n
+            for pos, i in enumerate(order): r[i] = pos
+            self.rank_of[k] = r
         self.cache = OrderedDict()
 
     @classmethod
@@ -448,6 +465,38 @@ class Catalog:
                     if i not in seen: seen.add(i); order.append(i)
         return order, parts, cpart
 
+    def browse(self, arguments, filters):
+        sort_by = arguments.get('sort_by', 'relevance')
+        desc = arguments.get('sort_order', 'desc') == 'desc'
+        key = ('id', False) if sort_by == 'relevance' else (sort_by, desc)
+        offset, limit = arguments.get('offset', 0), arguments.get('limit', 10)
+        P, need = self.products, offset + limit
+        subset, lo, hi = None, 0, self.n
+        for k in STRING_FILTERS:
+            if k in filters:
+                lst = self.by_value[k].get(filters[k].strip().casefold(), [])
+                if subset is None or len(lst) < len(subset): subset = lst
+        if 'min_price' in filters or 'max_price' in filters:
+            lo = bisect.bisect_left(self.sorted_prices, filters.get('min_price', -math.inf))
+            hi = bisect.bisect_right(self.sorted_prices, filters.get('max_price', math.inf))
+            if subset is None or hi - lo < len(subset):
+                subset = self.orders[('price', False)][lo:hi]
+        if subset is not None and len(subset) < 4000:
+            rank = self.rank_of[key]
+            picked = sorted((i for i in subset if self.matches(P[i], filters)), key=rank.__getitem__)[offset:need]
+        else:
+            picked = []
+            seq = self.orders[key]
+            if key[0] == 'price' and ('min_price' in filters or 'max_price' in filters):
+                part = self.orders[('price', False)][lo:hi]
+                seq = part if not desc else self.orders[('price', True)][self.n - hi:self.n - lo]
+            for i in seq:
+                if self.matches(P[i], filters):
+                    picked.append(i)
+                    if len(picked) >= need: break
+            picked = picked[offset:]
+        return {'results': [{'id': P[i]['id']} for i in picked], 'recommendations': []}
+
     def filter_indices(self, filters):
         idx = None
         for k in STRING_FILTERS:
@@ -474,7 +523,7 @@ class Catalog:
             for pi in targets:
                 if len(recs) >= 5: break
                 if cpart is not None and cpart['types']:
-                    ctypes = list(cpart['types'])
+                    ctypes = sorted(cpart['types'], key=lambda t: (-len(self.by_type[t]), t))
                 else:
                     ctypes = [t.casefold() for t in COMPLEMENTS.get(self.ptype[pi], [])]
                 ctypes = [t for t in ctypes if t in self.by_type_quality and t != self.ptype[pi]]
@@ -543,7 +592,7 @@ class Catalog:
             order, parts, cpart = self.rank(query, filters, with_recs)
             candidates = [P[i] for i in order]
         else:
-            candidates = [P[i] for i in self.filter_indices(filters)]
+            return self.browse(arguments, filters)
         sort_by = arguments.get('sort_by', 'relevance')
         reverse = arguments.get('sort_order', 'desc') == 'desc'
         if sort_by == 'relevance':
