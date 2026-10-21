@@ -190,6 +190,8 @@ COMPLEMENTS = {
     'tie': ['Shirt'], 'belt': ['Trousers'], 'scarf': ['Gloves', 'Hat/beanie'], 'gloves': ['Scarf', 'Hat/beanie'],
     'hat/beanie': ['Scarf', 'Gloves'], 'socks': ['Sneakers'], 'earring': ['Necklace', 'Bracelet'], 'necklace': ['Earring', 'Bracelet'],
 }
+MODIFIER_PHRASES = {'denim', 'hooded', 'body', 'vest'}
+GENERIC = {'clothes', 'clothing', 'things', 'stuff', 'gear', 'garments', 'apparel', 'outfits', 'wear', 'look', 'outfit'}
 NEUTRAL = {'black', 'white', 'off white', 'grey', 'light beige', 'beige'}
 
 
@@ -226,12 +228,15 @@ class Catalog:
         self.by_value = {k: defaultdict(list) for k in STRING_FILTERS}
         self.by_type = defaultdict(list)
         self.by_word = defaultdict(set)
+        self.by_name = defaultdict(set)
         for i, p in enumerate(P):
             for k in STRING_FILTERS:
                 self.by_value[k][str(p.get(k) or '').strip().casefold()].append(i)
             self.by_type[self.ptype[i]].append(i)
             for w in self.name_tok[i] | self.desc_tok[i]:
                 self.by_word[w].add(i)
+            for w in self.name_tok[i] | set(tokens(' '.join(str(p.get(k) or '') for k in ('pattern', 'color', 'product_type')))):
+                self.by_name[w].add(i)
         self.by_type_quality = {t: sorted(ix, key=lambda i: (-self.quality[i], P[i]['id'])) for t, ix in self.by_type.items()}
         # product-type phrase lexicon
         self.lex = {}
@@ -282,6 +287,7 @@ class Catalog:
     def parse_part(self, text):
         toks = [self.fix(t) for t in tokens(text)]
         types, boost, colours, groups, words, intents = set(), set(), [], set(), [], set()
+        mod_types, generic = set(), False
         i = 0
         while i < len(toks):
             for n in range(min(self.max_phrase, len(toks) - i), 0, -1):
@@ -289,19 +295,26 @@ class Catalog:
                 if n == 1 and toks[i] in MODS and i + 1 < len(toks) and toks[i + 1] in COLOURS:
                     colours.append([f'{toks[i]} {c}' if toks[i] != 'off' else 'off white' for c in COLOURS[toks[i + 1]]]); i += 2; break
                 if ph in self.lex and self.lex[ph][0]:
-                    types |= self.lex[ph][0]; boost |= self.lex[ph][1]; i += n; break
+                    if ph in MODIFIER_PHRASES:
+                        mod_types |= self.lex[ph][0]
+                    else:
+                        types |= self.lex[ph][0]
+                    boost |= self.lex[ph][1]; i += n; break
                 if n == 1:
                     w = toks[i]
                     if w in COLOURS: colours.append(COLOURS[w])
                     elif w in AUDIENCE_WORDS: groups.add(AUDIENCE_WORDS[w])
                     elif w in INTENTS: intents.add(w)
                     elif w in self.lex: boost |= self.lex[w][1]
+                    elif w in GENERIC: generic = True
                     elif w not in STOPWORDS: words.append(w)
                     i += 1
-        return dict(types=types, boost=boost, colours=colours, groups=groups, words=words, intents=intents)
+        if not types:
+            types = mod_types
+        return dict(types=types, boost=boost, colours=colours, groups=groups, words=words, intents=intents, generic=generic)
 
     def parse(self, query, with_recs):
-        q = query.casefold().replace('t-shirt', 'tshirt').replace('t shirt', 'tshirt').replace("'s", 's')
+        q = query.casefold().replace('date night', 'date').replace('t-shirt', 'tshirt').replace('t shirt', 'tshirt').replace("'s", 's')
         comp = None
         for rx in COMPLEMENT:
             m = rx.search(q)
@@ -317,6 +330,11 @@ class Catalog:
         q, lo, hi = parse_price(q)
         raw_parts = [x for x in SPLIT.split(q) if x.strip()]
         parsed = [self.parse_part(x) for x in raw_parts]
+        for k, p in enumerate(parsed):
+            if not p['types'] and p['colours'] and not p['words'] and not p['intents']:
+                nxt = next((x for x in parsed[k + 1:] if x['types']), None)
+                if nxt is not None:
+                    p['types'] = set(nxt['types']); p['boost'] = set(nxt['boost']); p['groups'] |= nxt['groups']
         typed = [p for p in parsed if p['types']]
         if len(typed) >= 2:
             # attach untyped fragments (modifiers like "for men" or "in grey") to all choices
@@ -341,7 +359,7 @@ class Catalog:
         if comp and with_recs:
             ctext, generic = comp
             ctext, clo, chi = parse_price(ctext)
-            cpart = self.parse_part(ctext) if not generic else dict(types=set(), boost=set(), colours=[], groups=set(), words=[], intents=set())
+            cpart = self.parse_part(ctext) if not generic else dict(types=set(), boost=set(), colours=[], groups=set(), words=[], intents=set(), generic=True)
             cpart['lo'], cpart['hi'] = clo, chi
             cpart['groups'] = cpart['groups'] or set().union(*[p['groups'] for p in parts])
         return parts, cpart
@@ -379,13 +397,16 @@ class Catalog:
             soft = set()
             if not content and not part['colours'] and not groups:
                 return {}
-            pool = None
-            for w in content:
-                s = self.by_word.get(w, set())
-                pool = set(s) if pool is None else pool & s
-            if pool is None:
-                pool = set(range(self.n))
-            words = []
+            if hard_groups and (part.get('generic') or not content):
+                pool = {i for i in range(self.n) if self.group[i] in hard_groups and self.ptype[i] != 'unknown'}
+            else:
+                pool = None
+                for w in content:
+                    s = self.by_name.get(w, set())
+                    pool = set(s) if pool is None else pool & s
+                if pool is None:
+                    pool = set(range(self.n))
+                words = []
         lo, hi = part['lo'], part['hi']
         out = {}
         for i in pool:
