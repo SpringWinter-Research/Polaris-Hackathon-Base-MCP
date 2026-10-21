@@ -1,3 +1,24 @@
+# Polaris product search MCP (team submission)
+
+This fork keeps the starter's single `search_products` tool, schemas, catalog and transport unchanged, and replaces the baseline search in `search.py`.
+
+## How the search works
+
+- **Query parsing.** Budgets written in words ("under INR 2000", "below Rs 1500", "between 1000 and 2000", "over 2500") become price limits. Colour words (including shades such as navy or light blue) and audience words (men, women, kids, baby) become requirements on the result. Explicit filters always apply first.
+- **Typos and synonyms.** Misspelt words are matched to the closest known shopping term (for example "blak jeens" becomes black jeans, "hodie" becomes hoodie). A synonym table maps everyday words to catalog product types: tee to T-shirt, jeans to denim trousers, trainers to sneakers, pyjamas to pyjama sets and so on.
+- **Scoring with an index.** At startup the server builds indexes by product type, by words in names and descriptions, and by every filter value. A product scores highest when its product type matches the request, then gains points for descriptive words (linen, floral, padded) found in its name or description, with a small bonus for well-reviewed items. Ties are broken by product ID so results never change between identical calls.
+- **Empty when nothing fits.** If a request names no product and its words do not appear in any product name or attribute (for example "laptop repair service"), the result is empty rather than random products. Impossible budgets or conflicting filters also return nothing.
+- **Occasion requests.** Phrases such as "something cosy for winter", "beach", "job interview", "gym" or "rainy day" map to sensible product types.
+- **Mixed choices.** "Black jeans and white T-shirts" or "cardigan or sweater in grey" are split into separate choices, each searched on its own, and the lists are interleaved into one ranked list. Shared details such as "for men" or "under 1500 each" apply to every choice.
+- **Complementary recommendations.** "A dress with a matching bag under INR 1000" searches dresses as the main results and bags as recommendations, with the bag budget applied only to the bag. Without an explicit request, a pairing table suggests useful companions (dress with bag or sandals, shirt with trousers or tie, bikini top with bottoms). Recommendations keep the same audience, prefer the same or a neutral colour, and each one points to a product on the current page.
+- **Speed.** Browsing with an empty query uses pre-sorted lists, so filter and sort calls take about a millisecond on the server. Repeated identical calls are answered from a small in-memory cache.
+
+## Checks
+
+`python -m unittest discover -s tests -v` and `python smoke_test.py http://127.0.0.1:8000/mcp` both pass. Two baseline unit-test assertions that assumed an ID-ordered relevance list and an always-empty recommendation list were relaxed to match the new behaviour.
+
+---
+
 # Polaris product search MCP starter
 
 Build a better product search engine behind one MCP tool: `search_products`. Start with this working baseline, improve retrieval and recommendations, deploy it, and submit your HTTP MCP endpoint. The accompanying `hackathon-brief.md` and `schemas/` define the competition contract. Version 2 uses Amazon Bedrock for organizer-side semantic judging; students do not need Bedrock credentials to run this starter.
